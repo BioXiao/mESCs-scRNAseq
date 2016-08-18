@@ -1,0 +1,203 @@
+---
+title: "Cleaning up mESCs data"
+author: "Belinda Phipson"
+date: "18/08/2016"
+output: html_document
+---
+
+# Introduction
+
+The mouse ESC dataset comes from Kolodziejczyk AA et al. 2015. Single cell RNA-sequencing of pluripotent states unlocks modular transcriptional variation. Cell Stem Cell. 17:471–485:  http://www.sciencedirect.com/science/article/pii/S193459091500418X.
+
+From the paper:
+
+##Cell Culture of mESCs
+
+Cells were grown in three media:
+
+The three media are as follows:
+
+
+1. Serum-containing media: Knockout DMEM (GIBCO), 1X penicillin-streptomycin-glutamine (GIBCO), 1X non-essential amino acids (GIBCO), 100 U/ml recombinant human leukemia inhibitory factor (Millipore), 15% fetal bovine serum (HyClone), 0.1mM β-mercaptoethanol (Sigma).
+
+
+2. Standard 2i media: N2B27 basal media (NDiff 227, StemCells), 100 U/ml recombinant human LIF (Millipore), 1 μM PD0325901 (Stemgent), 3 μM CHIR99021 (Stemgent).
+  
+3.  Alternative 2i media: N2B27 basal media (NDiff 227, StemCells), 100 U/ml recombinant human LIF (Millipore), 1 μM CGP77675 (Sigma), 3 μM CHIR99021 (Stemgent).
+
+##cDNA Library Preparation from Single Cells using the Fluidigm C1
+
+For each culture condition, 4,000 cells were loaded on to a 10–17 μm Fluidigm C1 Single-Cell Auto Prep IFC, and cell capture was performed according to the manufacturer’s instructions. The capture efficiency was inspected using a microscope to remove samples from the analysis with more than one cell captured. Upon capture, reverse transcription and cDNA preamplification were performed in the 10–17 μm Fluidigm C1 Single-Cell Auto Prep IFC using the SMARTer PCR cDNA Synthesis Kit (Clontech) and the Advantage 2 PCR Kit (Ramsköld et al., 2012). cDNA was harvested and diluted to a range of 0.1–0.3 ng/μl and Nextera libraries were prepared using the Nextera XT DNA Sample Preparation Kit and the Nextera Index Kit (Illumina) following the instructions in the Fluidigm manual “Using the C1™ Single-Cell Auto Prep System to Generate mRNA from Single Cells and Libraries for Sequencing.” Libraries from one chip were pooled, and paired-end 100 bp sequencing was performed on four lanes of an Illumina HiSeq2000.
+Bulk RNA-Sequencing
+
+## Bulk RNA-sequencing 
+Libraries were prepared and sequenced using the Wellcome Trust Sanger Institute sample preparation pipeline with Illumina’s TruSeq RNA Sample Preparation v2 Kit. RNA was extracted from 1–2 million cells using the QIAGEN RNA Purification Kit on a QiaCube robot. The quality of the RNA sample was checked using gel electrophoresis. For library preparation, poly-A RNA was purified from total RNA using oligo-dT magnetic pull-down. Subsequently, mRNA was fragmented using metal-ion catalyzed hydrolysis. The cDNA was synthesized using random hexamer priming, and end repair was performed to obtain blunt ends. A-tailing was done to enable subsequent ligation of Illumina paired-end sequencing adapters, and samples were multiplexed at this stage. The resulting library was amplified using 10 cycles of PCR, substituting the Kapa Hifi polymerase for the polymerase in the Illumina TruSeq Kit. Samples were diluted to 4nM, and 100 bp paired-end sequencing was carried out on an Illumina HiSeq2000. Sequencing Quality Control was performed by the Sanger sequencing facility.
+
+To me it doesn't look like UMI's were added, but they did use ERCC spike-ins. The cell type is stem cells, so if the short gene thing is stem cell specific, we may still see it in this dataset. If it is a UMI thing, we won't see it here, but hopefully we will see it in another UMI dataset.
+
+# Reading in the data
+Luke has processed the data using STAR and featureCounts, as well as with Kallisto. I'm going to use his mapped data for the analysis.
+
+```{r,libraries,cache=TRUE}
+library(edgeR)
+library(RColorBrewer)
+library(org.Mm.eg.db)
+library(limma)
+library(geneLenDataBase)
+library(gplots)
+```
+```{r}
+source("/group/bioi1/belinda/SingleCell/Normalisation/normCounts.R")
+source("/group/bioi1/belinda/SingleCell/Normalisation/modeBel.R")
+```
+
+```{r,cache=TRUE}
+counts.mesc <- read.delim("/group/bioi1/shared/public_data/Kolodziejczyk-mESCs-scRNAseq/counts/counts.txt",skip=1,stringsAsFactors = FALSE)
+targets.mesc <- read.delim("/group/bioi1/shared/public_data/Kolodziejczyk-mESCs-scRNAseq/metadata/E-MTAB-2600.sdrf.txt",stringsAsFactors = FALSE)
+d <- duplicated(targets.mesc$Comment.ENA_RUN.)
+targets.mesc <- targets.mesc[!d,]
+
+colnames(counts.mesc) <- gsub("X\\.mnt\\.storage\\.shared\\.public_data\\.Kolodziejczyk\\.mESCs\\.scRNAseq\\.STAR\\.2pass\\.","",colnames(counts.mesc))
+colnames(counts.mesc) <- gsub("\\.Aligned\\.out\\.bam","",colnames(counts.mesc))
+
+y.mesc <- counts.mesc[,-(1:6)]
+m <- match(colnames(y.mesc),targets.mesc$Comment.ENA_RUN.)
+targets.mesc <- targets.mesc[m,]
+table(targets.mesc$Comment.ENA_RUN.==colnames(y.mesc))
+rownames(y.mesc) <- counts.mesc[,1]
+```
+
+```{r,cache=TRUE}
+# Separating endogenous and ERCC controls
+ercc <- grep("ERCC",rownames(y.mesc))
+y.mesc.ercc <- y.mesc[ercc,]
+y.mesc.end <- y.mesc[-ercc,]
+```
+
+
+# Quality control of the cells
+```{r,cache=TRUE}
+# Get rid of all zeroes in ercc and end count matrices
+allZ <- rowSums(y.mesc.end)==0
+y.mesc.end <- y.mesc.end[!allZ,]
+allZ.ercc <- rowSums(y.mesc.ercc)==0
+y.mesc.ercc <- y.mesc.ercc[!allZ.ercc,]
+
+# Calculate propZeroes and lib size
+propZ <- colSums(y.mesc.end==0)/nrow(y.mesc.end)
+tot.seq <- colSums(y.mesc)
+tot.seq.ercc <- colSums(y.mesc.ercc)
+tot.seq.end <- colSums(y.mesc.end)
+```
+
+```{r,cache=TRUE}
+mypal <- brewer.pal(3,"Dark2")
+par(mfrow=c(1,2))
+plot(propZ,sqrt(tot.seq.end),col=mypal[factor(targets.mesc$Material.Type)],xlab="Proportion Zeroes in Single Cells",ylab="Sqrt(library size)")
+legend("topright",legend=c("Bulk","SingleCell"),fill=mypal[1:2])
+plot(propZ,sqrt(tot.seq.end),col=mypal[factor(targets.mesc$FactorValue.growth.condition.)],xlab="Proportion Zeroes in Single Cells",ylab="Sqrt(library size)")
+title("Coloured by the 3 growth media")
+abline(h=750,lty=2)
+abline(v=0.8,lty=2)
+
+plot(propZ,sqrt(tot.seq.ercc/tot.seq),col=mypal[factor(targets.mesc$FactorValue.growth.condition.)],xlim=c(0.6,1),ylab="ERCC lib size/Total lib size",xlab="Proportion Zeroes in Single Cells")
+title("Coloured by 3 growth media")
+abline(h=0.28,lty=2)
+abline(v=0.8,lty=2)
+plot(sqrt(tot.seq.end),sqrt(tot.seq.ercc/tot.seq),col=mypal[factor(targets.mesc$FactorValue.growth.condition.)],ylab="sqrt(ERCC lib size/Total lib size)",xlab="Sqrt(Total lib size endogenous)",xlim=c(0,5000))
+title("Coloured by 3 growth media")
+abline(h=0.28,lty=2)
+abline(v=750,lty=2)
+```
+```{r,cache=TRUE}
+# Colour by plate
+mypal <- brewer.pal(8,"Dark2")
+morecol <- colorRampPalette(mypal)
+cols <- morecol(14)
+
+plate <- gsub("_.$","",targets.mesc$Source.Name)
+plate <- gsub("_..$","",plate)
+table(plate)
+targets.mesc$plate <- plate
+
+par(mfrow=c(1,2))
+plot(propZ,sqrt(tot.seq.ercc/tot.seq),col=cols[factor(plate)],xlim=c(0.6,1),ylab="Sqrt(ERCC lib size/Total lib size)",xlab="Proportion Zeroes in Single Cells")
+title("Coloured by plate")
+abline(h=0.28,lty=2)
+plot(sqrt(tot.seq.end),sqrt(tot.seq.ercc/tot.seq),col=cols[factor(plate)],ylab="sqrt(ERCC lib size/Total lib size)",xlab="Sqrt(Total lib size endogenous)",xlim=c(0,5000))
+title("Coloured by plate")
+abline(h=0.28,lty=2)
+
+par(mfrow=c(1,2))
+boxplot(tot.seq.ercc/tot.seq~plate,las=2,ylab="PropERCC/TotalLibSize")
+boxplot(sqrt(tot.seq.ercc)~plate,las=2,ylab="Sqrt(Total ERCC)")
+```
+
+##Filtering
+
+I've decided to filter out cells that have a very high proportion of zeroes and very low lib size (Prop > 0.8 and sqrt(lib size)<750). I am also going to filter out three plates that had weird looking ERCC spike ins: 2i\_3, a2i\_3, serum\_3. 
+
+```{r,cache=TRUE}
+# Keep cells with prop zeroes less than 0.8 and sqrt(lib size) > 750
+keep1 <- propZ<0.8 & sqrt(tot.seq.end)>750
+y.mesc.keep <- y.mesc.end[,keep1]
+targets.keep <- targets.mesc[keep1,]
+
+# Get rid of those three bad plates
+bad_plates <- c("2i_3","a2i_3","serum_3")
+throw_away <- targets.keep$plate %in% bad_plates
+y.mesc.keep <- y.mesc.keep[,!throw_away]
+targets.keep <- targets.keep[!throw_away,] 
+
+# Separate bulk from single cells
+y.bulk <- y.mesc.keep[,targets.keep$Material.Type=="cells"]
+y.mesc.keep <- y.mesc.keep[,targets.keep$Material.Type=="single cell"]
+targets.bulk <- targets.keep[targets.keep$Material.Type=="cells",]
+targets.keep <- targets.keep[targets.keep$Material.Type=="single cell",]
+
+table(targets.keep$Comment.ENA_RUN. == colnames(y.mesc.keep))
+
+# Filter out genes where > 90% of the cells are zeroes
+propZ_genes <- rowSums(y.mesc.keep==0)/ncol(y.mesc.keep)
+y.mesc.keep <- y.mesc.keep[propZ_genes<=0.9,]
+```
+
+```{r,cache=TRUE}
+mypal <- brewer.pal(3,"Dark2")
+propZ.keep <- colSums(y.mesc.keep==0)/nrow(y.mesc.keep)
+plot(colSums(y.mesc.keep),propZ.keep,col=mypal[factor(targets.keep$FactorValue.growth.condition.)])
+```
+
+```{r,cache=TRUE}
+y <- DGEList(y.mesc.keep,group=targets.keep$FactorValue.growth.condition.)
+rownames(y)<-gsub("\\..*","",rownames(y))
+rownames(counts.mesc) <- gsub("\\..*","",counts.mesc[,1])
+```
+
+```{r,cache=TRUE}
+#annotation
+ens <- toTable(org.Mm.egENSEMBL)
+m <- match(rownames(y),ens$ensembl_id)
+ann <- data.frame(Original_ID=rownames(y),ens[m,])
+symbol <- toTable(org.Mm.egSYMBOL)
+m <- match(ann$gene_id,symbol$gene_id)
+ann$symbol <- symbol$symbol[m]
+genename <- toTable(org.Mm.egGENENAME)
+m <- match(ann$gene_id,genename$gene_id)
+ann$genename <- genename$gene_name[m]
+m <- match(rownames(y),rownames(counts.mesc))
+ann$length <- counts.mesc$Length[m]
+y$genes <- ann
+```
+
+```{r,cache=TRUE}
+mypal <- brewer.pal(6,"Dark2")
+mds <- plotMDS(y,col=mypal[factor(targets.keep$plate)],pch=16)
+
+par(mfrow=c(1,1))
+plot(mds,col=mypal[factor(targets.keep$plate)],pch=c(1,2,4)[factor(targets.keep$FactorValue.growth.condition.)])
+legend("bottom",legend=levels(factor(targets.keep$plate)),col=mypal,pch=16)
+legend("topright",legend=levels(factor(targets.keep$FactorValue.growth.condition.)),pch=c(1,2,4))
+title("MDSplot mouse embryonic stem cell data")
+```
+I'm pretty happy with how this data looks after filtering out cells and genes that have too many zeroes. It is possible I have been too stringent with the filtering and have excluded cells that perhaps should not have been excluded. But I feel confident this cleaned up data is pretty good, so I am happier to explore aspects of this dataset now.
