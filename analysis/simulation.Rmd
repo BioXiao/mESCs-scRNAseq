@@ -1,0 +1,694 @@
+---
+title: "Simulation"
+author: "Luke Zappia"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+Code version: `r system("git log -1 --format=oneline | cut -d' ' -f1", intern = TRUE)`
+
+```{r knitr, include = FALSE}
+DOCNAME = "simulation"
+knitr::opts_chunk$set(autodep        = TRUE,
+                      cache          = TRUE,
+                      cache.path     = paste0("cache/", DOCNAME, "/"),
+                      cache.comments = TRUE,
+                      echo           = FALSE,
+                      error          = FALSE,
+                      fig.align      = "center",
+                      fig.path       = paste0("figures/", DOCNAME, "/"),
+                      fig.width      = 10,
+                      fig.height     = 8,
+                      message        = FALSE,
+                      warning        = FALSE)
+```
+
+```{r libraries}
+# RNA-seq
+library("scater")
+library("scRNAseqSim")
+
+# Statistics
+library("fitdistrplus")
+
+# Data manipulation
+library("tidyr")
+library("magrittr")
+library("dplyr")
+
+# Plotting
+library("ggplot2")
+```
+
+```{r source, cache = FALSE}
+source("../R/load_SCESet.R")
+source("../R/filter_SCESet.R")
+source("../R/add_stats_SCESet.R")
+source("../R/estimate_sim_params.R")
+```
+
+```{r ggtheme, cache = FALSE}
+theme_doc <- ggplot2::theme_minimal(base_size = 14) +
+             ggplot2::theme(legend.position = "bottom")
+ggplot2::theme_set(theme_doc)
+```
+
+Introduction
+============
+
+In this document we are going to attempt to build a simulation that looks like 
+scRNA-seq data from Kolodziejczyk AA et al. 2015. ["Single cell RNA-sequencing
+of pluripotent states unlocks modular transcriptional variation."](
+http://www.sciencedirect.com/science/article/pii/S193459091500418X).
+
+Data
+====
+
+For this simulation we are going to compare against the counts from reads for
+a single condition, "standard 2i media + LIF". Bad cells and genes with low
+counts will be filtered out, as will the ERCC spike-ins.
+
+```{r load}
+datasets <- list()
+descrips <- list()
+
+real.name <- "Kolod"
+real.desc <- "Single condition with bad cells removed"
+
+real <- loadKolodCounts()
+real <- filterKolodCounts(real, ercc = TRUE,
+                          condition = "standard 2i media + LIF")
+real <- addGeneStats(real, "counts")
+real <- addGeneStats(real, "cpm")
+real <- addGeneStats(real, "cpm", log = TRUE)
+real <- addGeneStats(real, "cpm", no.zeros = TRUE)
+real <- addGeneStats(real, "cpm", log = TRUE, no.zeros = TRUE)
+real <- addIsZeroOutlier(real)
+
+datasets[real.name] <- real
+descrips[real.name] <- real.desc
+```
+
+Some of the parameters for our simulations can be estimated from the data. These
+are:
+
+```{r estimate}
+n.genes  <- dim(real)[1]
+n.cells  <- dim(real)[2]
+fit      <- fitdist(pData(real)$total_counts, "lnorm")
+lib.mean <- fit$estimate["meanlog"]
+lib.sd   <- fit$estimate["sdlog"]
+disp     <- edgeR::estimateCommonDisp(counts(real))
+#disp     <- 0.02
+
+est        <- estGammaParams(counts(real))
+mean.rate  <- est$Rate
+mean.shape <- est$Shape
+
+est        <- estLogisticParams(counts(real))
+drop.mid   <- est$Midpoint
+drop.shape <- est$Shape
+
+params <- data.frame(Parameter = c("Number of genes", "Number of cells",
+                                   "Log mean lib size", "Log SD lib size",
+                                   "Mean rate", "Mean shape",
+                                   "Counts Dispersion", "Dropout Midpoint",
+                                   "Dropout Shape"),
+                     Value = c(n.genes, n.cells, lib.mean, lib.sd, mean.rate,
+                               mean.shape, disp, drop.mid, drop.shape))
+knitr::kable(params, digits = 4)
+```
+
+```{r simulation1}
+sim1.name <- "Basic"
+sim1.desc <- "Basic simulation with fitted parameters"
+
+set.seed(1)
+sim1 <- zapSimulate(n.genes          = n.genes,
+                    n.cells          = n.cells,
+                    lib.mean         = lib.mean,   #lib.mean         = 10,
+                    lib.sd           = lib.sd,     #lib.sd           = 0.5,
+                    mean.rate        = mean.rate,  #mean.rate        = 0.3, 
+                    mean.shape       = mean.shape, #mean.shape       = 0.4,
+                    cell.mean        = 0,
+                    cell.sd          = 0,          #cell.sd          = 0.8,
+                    count.disp       = disp,       #count.disp       = 0.1, 
+                    dropout          = FALSE,      #dropout          = TRUE,
+                    logistic.mid     = drop.mid,   #logistic.mid     = 0,
+                    logistic.shape   = drop.shape, #logistic.shape   = -1,
+                    out.prob         = 0,          #out.prob         = 0.1, 
+                    out.lo.prob      = 0.5,
+                    out.fac.mean     = 4,
+                    out.fac.sd       = 1,
+                    de.prob          = 0,          #de.prob          = 0.1, 
+                    de.down.prob     = 0.5,
+                    de.fac.mean      = 4,
+                    de.fac.sd        = 1,
+                    bcv.prob         = 0,          #bcv.prob         = 0.1, 
+                    bcv.df           = 25,
+                    bcv.out.df       = 0.5,
+                    add.assay        = TRUE,
+                    verbose          = TRUE)
+
+fData(sim1)$gene <- rownames(sim1)
+sim1 <- calculateQCMetrics(sim1)
+
+sim1 <- addGeneStats(sim1, "counts")
+sim1 <- addGeneStats(sim1, "cpm")
+sim1 <- addGeneStats(sim1, "cpm", log = TRUE)
+sim1 <- addGeneStats(sim1, "cpm", no.zeros = TRUE)
+sim1 <- addGeneStats(sim1, "cpm", log = TRUE, no.zeros = TRUE)
+sim1 <- addIsZeroOutlier(sim1)
+
+datasets[sim1.name] <- sim1
+descrips[sim1.name] <- sim1.desc
+```
+
+```{r simulation2}
+sim2.name <- "Dropout"
+sim2.desc <- "Basic simulation with added dropout"
+
+set.seed(1)
+sim2 <- zapSimulate(n.genes          = n.genes,
+                    n.cells          = n.cells,
+                    lib.mean         = lib.mean,   #lib.mean         = 10,
+                    lib.sd           = lib.sd,     #lib.sd           = 0.5,
+                    mean.rate        = mean.rate,  #mean.rate        = 0.3, 
+                    mean.shape       = mean.shape, #mean.shape       = 0.4,
+                    cell.mean        = 0,
+                    cell.sd          = 0,          #cell.sd          = 0.8,
+                    count.disp       = disp,       #count.disp       = 0.1, 
+                    dropout          = TRUE,
+                    logistic.mid     = drop.mid,   #logistic.mid     = 0,
+                    logistic.shape   = drop.shape, #logistic.shape   = -1,
+                    out.prob         = 0,          #out.prob         = 0.1, 
+                    out.lo.prob      = 0.5,
+                    out.fac.mean     = 4,
+                    out.fac.sd       = 1,
+                    de.prob          = 0,          #de.prob          = 0.1, 
+                    de.down.prob     = 0.5,
+                    de.fac.mean      = 4,
+                    de.fac.sd        = 1,
+                    bcv.prob         = 0,          #bcv.prob         = 0.1, 
+                    bcv.df           = 25,
+                    bcv.out.df       = 0.5,
+                    add.assay        = TRUE,
+                    verbose          = TRUE)
+
+fData(sim2)$gene <- rownames(sim2)
+sim2 <- calculateQCMetrics(sim2)
+
+sim2 <- addGeneStats(sim2, "counts")
+sim2 <- addGeneStats(sim2, "cpm")
+sim2 <- addGeneStats(sim2, "cpm", log = TRUE)
+sim2 <- addGeneStats(sim2, "cpm", no.zeros = TRUE)
+sim2 <- addGeneStats(sim2, "cpm", log = TRUE, no.zeros = TRUE)
+sim2 <- addIsZeroOutlier(sim2)
+
+datasets[sim2.name] <- sim2
+descrips[sim2.name] <- sim2.desc
+```
+
+```{r simulation3}
+sim3.name <- "Exp. Outliers"
+sim3.desc <- "Basic simulation with expression outliers"
+
+set.seed(1)
+sim3 <- zapSimulate(n.genes          = n.genes,
+                    n.cells          = n.cells,
+                    lib.mean         = lib.mean,   #lib.mean         = 10,
+                    lib.sd           = lib.sd,     #lib.sd           = 0.5,
+                    mean.rate        = mean.rate,  #mean.rate        = 0.3, 
+                    mean.shape       = mean.shape, #mean.shape       = 0.4,
+                    cell.mean        = 0,
+                    cell.sd          = 0,          #cell.sd          = 0.8,
+                    count.disp       = disp,       #count.disp       = 0.1,  
+                    dropout          = FALSE,      #dropout          = TRUE,
+                    logistic.mid     = drop.mid,   #logistic.mid     = 0,
+                    logistic.shape   = drop.shape, #logistic.shape   = -1,
+                    out.prob         = 0.2,        #out.prob         = 0.1,
+                    out.lo.prob      = 0.5,
+                    out.fac.mean     = 4,
+                    out.fac.sd       = 0.06,       #out.fac.sd       = 1,
+                    de.prob          = 0,          #de.prob          = 0.1, 
+                    de.down.prob     = 0.5,
+                    de.fac.mean      = 4,
+                    de.fac.sd        = 1,
+                    bcv.prob         = 0,          #bcv.prob         = 0.1, 
+                    bcv.df           = 25,
+                    bcv.out.df       = 0.5,
+                    add.assay        = TRUE,
+                    verbose          = TRUE)
+
+fData(sim3)$gene <- rownames(sim3)
+sim3 <- calculateQCMetrics(sim3)
+
+sim3 <- addGeneStats(sim3, "counts")
+sim3 <- addGeneStats(sim3, "cpm")
+sim3 <- addGeneStats(sim3, "cpm", log = TRUE)
+sim3 <- addGeneStats(sim3, "cpm", no.zeros = TRUE)
+sim3 <- addGeneStats(sim3, "cpm", log = TRUE, no.zeros = TRUE)
+sim3 <- addIsZeroOutlier(sim3)
+
+datasets[sim3.name] <- sim3
+descrips[sim3.name] <- sim3.desc
+```
+
+```{r simulation4}
+sim4.name <- "Dropout + Exp. Outliers"
+sim4.desc <- "Basic simulation with dropout and expression outliers"
+
+set.seed(1)
+sim4 <- zapSimulate(n.genes          = n.genes,
+                    n.cells          = n.cells,
+                    lib.mean         = lib.mean,   #lib.mean         = 10,
+                    lib.sd           = lib.sd,     #lib.sd           = 0.5,
+                    mean.rate        = mean.rate,  #mean.rate        = 0.3, 
+                    mean.shape       = mean.shape, #mean.shape       = 0.4,
+                    cell.mean        = 0,
+                    cell.sd          = 0,          #cell.sd          = 0.8,
+                    count.disp       = disp,       #count.disp       = 0.1,  
+                    dropout          = TRUE,
+                    logistic.mid     = drop.mid,   #logistic.mid     = 0,
+                    logistic.shape   = drop.shape, #logistic.shape   = -1,
+                    out.prob         = 0.2,        #out.prob         = 0.1,
+                    out.lo.prob      = 0.5,
+                    out.fac.mean     = 4,
+                    out.fac.sd       = 1,
+                    de.prob          = 0,          #de.prob          = 0.1, 
+                    de.down.prob     = 0.5,
+                    de.fac.mean      = 4,
+                    de.fac.sd        = 1,
+                    bcv.prob         = 0,          #bcv.prob         = 0.1, 
+                    bcv.df           = 25,
+                    bcv.out.df       = 0.5,
+                    add.assay        = TRUE,
+                    verbose          = TRUE)
+
+fData(sim4)$gene <- rownames(sim4)
+sim4 <- calculateQCMetrics(sim4)
+
+sim4 <- addGeneStats(sim4, "counts")
+sim4 <- addGeneStats(sim4, "cpm")
+sim4 <- addGeneStats(sim4, "cpm", log = TRUE)
+sim4 <- addGeneStats(sim4, "cpm", no.zeros = TRUE)
+sim4 <- addGeneStats(sim4, "cpm", log = TRUE, no.zeros = TRUE)
+sim4 <- addIsZeroOutlier(sim4)
+
+datasets[sim4.name] <- sim4
+descrips[sim4.name] <- sim4.desc
+```
+
+We are considering the following simulations:
+
+```{r sim-details}
+descrips <- unlist(descrips)
+details  <- data.frame(Dataset     = names(descrips),
+                       Type        = c("Real",
+                                       rep("Simulation", length(descrips) - 1)),
+                       Description = descrips)
+knitr::kable(details, row.names = FALSE)
+```
+
+```{r combine}
+fData.long <- mutate(fData(real), dataset = real.name)
+pData.long <- mutate(pData(real), dataset = real.name)
+
+for (sim.name in names(datasets)[-1]) {
+    sim <- datasets[[sim.name]]
+    fData.long <- bind_rows(fData.long,
+                            {fData(sim) %>% mutate(dataset = sim.name)})
+    pData.long <- bind_rows(pData.long,
+                            {pData(sim) %>% mutate(dataset = sim.name)})
+}
+
+fData.long <- mutate(fData.long,
+                     dataset = factor(dataset, levels = names(datasets)))
+pData.long <- mutate(pData.long,
+                     dataset = factor(dataset, levels = names(datasets)))
+```
+
+We can now look at comparing the simulations and the real data.
+
+Comparison
+==========
+
+PCA
+---
+
+```{r pca}
+cols <- RColorBrewer::brewer.pal(8, "Dark2")
+names(cols) <- names(datasets)
+
+for (data.name in names(datasets)) {
+    data <- datasets[[data.name]]
+    pca  <- plotPCA(data, ncomponents = 4) +
+            ggtitle(paste0("PCA (", data.name, ")")) +
+            theme(strip.background = element_rect(fill = cols[data.name]))
+    print(pca)
+}
+```
+
+By gene
+-------
+
+```{r density-mean}
+ggplot(fData.long, aes(x = mean_cpm, colour = dataset, fill = dataset)) +
+    geom_density(alpha = 0.2, size = 2)                                 +
+    scale_x_log10(labels = scales::comma)                               +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")            +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")              +
+    xlab("Mean CPM")                                                    +
+    ylab("Density")                                                     +
+    ggtitle("Comparison of mean expression densities")
+```
+
+```{r density-mean-no0}
+ggplot(fData.long, aes(x = mean_cpm_no0, colour = dataset, fill = dataset)) +
+    geom_density(alpha = 0.2, size = 2)                                     +
+    scale_x_log10(labels = scales::comma)                                   +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")                +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")                  +
+    xlab("Mean CPM")                                                        +
+    ylab("Density")                                                         +
+    ggtitle("Comparison of mean expression densities (no zeros)")
+```
+
+```{r boxplot-mean}
+ggplot(fData.long, aes(x = dataset, y = mean_cpm, colour = dataset)) +
+    geom_jitter(alpha = 0.01)                                        +
+    geom_boxplot(size = 1, alpha = 0)                                +
+    scale_colour_brewer(palette = "Dark2", guide = FALSE)            +
+    scale_y_log10(labels = scales::comma)                            +
+    ylab("Mean CPM")                                                 +
+    ggtitle("Comparison of mean expression boxplots")                +
+    theme(axis.title.x = element_blank())
+```
+
+```{r order-mean}
+fData.long                                                   %>%
+    group_by(dataset)                                        %>%
+    arrange(mean_cpm)                                        %>%
+    mutate(order = 1:n.genes)                                %>%
+    ggplot(aes(x = order, y = mean_cpm, colour = dataset))   +
+    geom_point()                                             +
+    scale_y_log10(labels = scales::comma)                    +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset") +
+    xlab("Order index")                                      +
+    ylab("Mean CPM")                                         +
+    ggtitle("Comparison of ordered mean expression")         +
+    theme(legend.position = "bottom")
+```
+
+```{r boxplot-var}
+ggplot(fData.long, aes(x = dataset, y = var_cpm, colour = dataset)) +
+    geom_jitter(alpha = 0.01)                                       +
+    geom_boxplot(size = 1, alpha = 0)                               +
+    scale_colour_brewer(palette = "Dark2", guide = FALSE)           +
+    scale_y_log10(labels = scales::comma)                           +
+    ylab("CPM Variance")                                            +
+    ggtitle("Comparison of expression variance boxplots")           +
+    theme(axis.title.x = element_blank())
+```
+
+```{r obs-exp-zeros}
+fData.long %>%
+    mutate(n_zeros = n.cells - n_cells_exprs)                      %>%
+    mutate(exp_zeros = dnbinom(0, mu = mean_counts,
+                               size = 1 / 0.1) * n.cells)          %>%
+    mutate(diff_zeros = n_zeros - exp_zeros)                       %>%
+    ggplot(aes(x = mean_counts, y = diff_zeros, colour = dataset)) +
+    geom_point(size = 0.1, alpha = 0.7)                            +
+    geom_abline(slope = 0, intercept = 0, size = 2, alpha = 0.7,
+                colour = "red")                                    +
+    geom_smooth(size = 2, se = FALSE)                              +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")       +
+    scale_x_log10(labels = scales::comma)                          +
+    facet_wrap(~ dataset, ncol = 2)                                +
+    xlab("Mean Counts")                                            +
+    ylab("Observed zeros - expected zeros")                        +
+    ggtitle("Difference from expected number of zeros by mean")
+```
+
+```{r num-zeros}
+fData.long %>%
+    group_by(dataset) %>%
+    summarise(total_zeros = sum(n.cells - n_cells_exprs))     %>%
+    ggplot(aes(x = dataset, y = total_zeros, fill = dataset)) +
+    geom_bar(stat = "identity")                               +
+    scale_fill_brewer(palette = "Dark2", guide = FALSE)       +
+    scale_y_continuous(labels = scales::comma)                +
+    ylab("Total number of zeros")                             +
+    ggtitle("Comparison of number of zeros")                  +
+    theme(axis.title.x = element_blank()) 
+```
+
+```{r num-all-genes}
+fData.long %>%
+    group_by(dataset) %>%
+    summarise(n_zero_genes = sum(n_cells_exprs == n.cells))    %>%
+    ggplot(aes(x = dataset, y = n_zero_genes, fill = dataset)) +
+    geom_bar(stat = "identity")                                +
+    scale_fill_brewer(palette = "Dark2", guide = FALSE)        +
+    scale_y_continuous(labels = scales::comma)                 +
+    ylab("Number of genes expressed in all cells")             +
+    ggtitle("Comparison of number of all genes")               +
+    theme(axis.title.x = element_blank())
+```
+
+```{r num-zeros-genes}
+fData.long %>%
+    group_by(dataset)                                          %>%
+    summarise(n_zero_genes = sum(n_cells_exprs == 0))          %>%
+    ggplot(aes(x = dataset, y = n_zero_genes, fill = dataset)) +
+    geom_bar(stat = "identity")                                +
+    scale_fill_brewer(palette = "Dark2", guide = FALSE)        +
+    scale_y_continuous(labels = scales::comma)                 +
+    ylab("Number of all zero genes")                           +
+    ggtitle("Comparison of number of zero genes")              +
+    theme(axis.title.x = element_blank())
+```
+
+```{r density-zeros}
+ggplot(fData.long, aes(x = n.cells - n_cells_exprs, colour = dataset,
+                      fill = dataset))                                     +
+    geom_density(alpha = 0.2, size = 2)                                    +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")               +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")                 +
+    xlab("Number of zero cells per gene")                                  +
+    ylab("Density")                                                        +
+    ggtitle("Comparison of number of zeros densities")
+```
+
+```{r histogram-zeros}
+ggplot(fData.long, aes(x = n.cells - n_cells_exprs, colour = dataset,
+                      fill = dataset))                                     +
+    geom_histogram(binwidth = 10)                                          +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")               +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")                 +
+    facet_wrap(~ dataset)                                                  +
+    xlab("Number of zero cells per gene")                                  +
+    ylab("Count of genes")                                                 +
+    ggtitle("Comparison of number of zeros densities")
+```
+
+```{r zeros-boxplot}
+ggplot(fData.long,
+       aes(x = dataset, y = n.cells - n_cells_exprs, colour = dataset)) +
+    geom_jitter(alpha = 0.02)                                           +
+    geom_boxplot(size = 1, alpha = 0)                                   +
+    scale_colour_brewer(palette = "Dark2", guide = FALSE)               +
+    ylab("Number of zero cells")                                        +
+    ggtitle("Number of zero cells per gene")
+```
+
+```{r mean-dropout}
+ggplot(fData.long, aes(x = mean_log_cpm, y = pct_dropout, group = dataset,
+                      colour = dataset))                                   +
+    geom_point(size = 0.1, alpha = 0.5)                                    + 
+    geom_smooth(size = 2, se = FALSE)                                      +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")               +
+    xlab(expression(paste("Mean ", log[2], "(CPM + 1)")))                  +
+    ylab("% Cells with zero expression")                                   +
+    ggtitle("Expression vs percentage dropout")
+```
+
+```{r mean-var}
+ggplot(fData.long, aes(x = mean_cpm, y = var_cpm, group = dataset,
+                      colour = dataset))                            +
+    geom_point(size = 0.1, alpha = 0.5)                             + 
+    geom_smooth(size = 2, se = FALSE)                               +
+    geom_abline(slope = 1, intercept = 0, size = 1, colour = "red") +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")        +
+    scale_x_log10(labels = scales::comma)                           +
+    scale_y_log10(labels = scales::comma)                           +
+    xlab("Mean CPM")                                                +
+    ylab("Variance CPM")                                            +
+    ggtitle("Mean vs Variance")
+```
+
+```{r prop-zeros}
+plot.data <- fData.long                                              %>%
+             mutate(n_zero = n.cells - n_cells_exprs)                %>%
+             group_by(dataset)                                       %>%
+             arrange(mean_log_cpm)                                   %>%
+             mutate(prop_total_zeros = n_zero / sum(n_zero))         %>%
+             mutate(cum_prop_total_zeros = cumsum(prop_total_zeros))
+
+ggplot(plot.data,
+       aes(x = mean_log_cpm, y = prop_total_zeros, colour = dataset)) +
+    geom_point(size = 0.1, alpha = 0.5)                               + 
+    geom_smooth(size = 2, se = FALSE)                                 +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")          +
+    scale_y_continuous(labels = scales::comma)                        +
+    ylab("Proportion of total zeros")                                 +
+    xlab(expression(paste("Mean ", log[2], "(CPM + 1)")))             +
+    ggtitle("Proportion of zeros vs mean")
+```
+
+```{r cum-prop-zeros}
+ggplot(plot.data,
+       aes(x = mean_log_cpm, y = cum_prop_total_zeros, colour = dataset)) +
+    geom_point(size = 2, alpha = 0.7, aes(colour = dataset))              + 
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")              +
+    ylab("Cumulative proportion of total zeros")                          +
+    xlab(expression(paste("Mean ", log[2], "(CPM + 1)")))                 +
+    ggtitle("Cumulative proportion of zeros vs mean")
+```
+
+```{r mads-zeros}
+ggplot(plot.data, aes(x = med_log_cpm / mad_log_cpm, y = n_zero,
+                      colour = dataset))                            +
+    geom_point(size = 0.2, alpha = 0.7)                             +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")        +
+    xlab(expression(paste("Median / MAD (", log[2], "(CPM + 1))"))) +
+    ylab("Number of zero cells")                                    +
+    ggtitle("MADs from zero vs number of zeros")
+```
+
+```{r num-zero-outliers}
+plot.data <- fData.long                                   %>%
+    mutate(got_zero = n_cells_exprs < n.cells)            %>%
+    mutate(got_zero_outlier = got_zero * is_zero_outlier) %>%
+    group_by(dataset)
+
+plot.data %>%
+    summarise(n_zero_outliers = sum(got_zero_outlier, na.rm = TRUE)) %>% 
+    ggplot(aes(x = dataset, y = n_zero_outliers, fill = dataset))    +
+    geom_bar(stat = "identity")                                      +
+    scale_fill_brewer(palette = "Dark2", guide = FALSE)              +
+    ylab("Number of genes with a zero outlier")                      +
+    ggtitle("Comparison of zero outliers")                           +
+    theme(axis.title.x = element_blank())
+```
+
+```{r mean-zero-outliers-pct}
+plot.data %>%
+    mutate(bin = ntile(mean_log_cpm, 100))                           %>%
+    group_by(dataset, bin)                                           %>%
+    summarise(n_zero_outliers = sum(got_zero_outlier, na.rm = TRUE)) %>%
+    ggplot(aes(x = bin, y = n_zero_outliers, colour = dataset))      +
+    geom_line(size = 1, alpha = 0.5)                                 +
+    geom_point(size = 2)                                             +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")         +
+    xlab("Percentile of mean expression")                            +
+    ylab("Number of genes with a zero outlier")                      +
+    ggtitle("Zero outliers by expresion percentile")
+```
+
+```{r pct-count-cells}
+ggplot(fData.long, aes(x = n_cells_exprs, y = pct_total_counts,
+                      colour = dataset))                                  +
+    geom_point(size = 0.2, alpha = 0.7)                                   +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")              +
+    scale_y_log10(labels = scales::comma)                                 +
+    xlab("Number of cells expressed")                                     +
+    ylab("Percentage of total counts")                                    +
+    ggtitle("Comparison of number of expressed cells and % total counts")
+```
+
+```{r mean-cells}
+ggplot(fData.long, aes(x = mean_log_cpm, y = n_cells_exprs,
+                      colour = dataset))                     +
+    geom_point(size = 0.2, alpha = 0.7)                      +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset") +
+    xlab(expression(paste("Mean ", log[2], "(CPM + 1)")))    +
+    ylab("Number of cells expressed")                        +
+    ggtitle("Mean expression vs number of cells expressed") 
+```
+
+By cell
+-------
+
+```{r density-total}
+ggplot(pData.long, aes(x = total_counts, colour = dataset, fill = dataset)) +
+    geom_density(alpha = 0.2, size = 2)                                     +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")                +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")                  +
+    scale_x_log10(labels = scales::comma)                                   +
+    xlab("Total counts")                                                    +
+    ylab("Density")                                                         +
+    ggtitle("Comparison of total counts densities")
+```
+
+```{r boxplot-total}
+ggplot(pData.long, aes(x = dataset, y = total_counts, colour = dataset)) +
+    geom_jitter(alpha = 0.2)                                             +
+    geom_boxplot(size = 1, alpha = 0)                                    +
+    scale_colour_brewer(palette = "Dark2", guide = FALSE)                +
+    scale_y_log10(labels = scales::comma)                                +
+    xlab("Dataset")                                                      +
+    ylab("Total counts")                                                 +
+    ggtitle("Comparison of total counts boxplots")                       +
+    theme(axis.title.x = element_blank())
+```
+
+```{r density-zeros-cells}
+ggplot(pData.long, aes(x = n.genes - total_features, colour = dataset,
+                      fill = dataset)) +
+    geom_density(alpha = 0.2, size = 2)                                    +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")               +
+    scale_fill_brewer(palette = "Dark2", name = "Dataset")                 +
+    xlab("Number of zero genes per cell")                                  +
+    ylab("Density")                                                        +
+    ggtitle("Comparison of number of zeros densities")
+```
+
+```{r zeros-boxplot-cells}
+ggplot(pData.long,
+       aes(x = dataset, y = n.genes - total_features, colour = dataset)) +
+    geom_jitter(alpha = 0.2)                                             +
+    geom_boxplot(size = 1, alpha = 0)                                    +
+    scale_colour_brewer(palette = "Dark2", guide = FALSE)                +
+    ylab("Number of zero genes")                                         +
+    ggtitle("Number of zero genes per cell")                             +
+    theme_minimal(base_size = 14)
+```
+
+```{r counts-features}
+ggplot(pData.long, aes(x = total_counts, y = total_features,
+                       colour = dataset))                               +
+    geom_point(size = 0.2, alpha = 0.7)                                 +
+    geom_smooth(size = 2, se = FALSE)                                   +
+    scale_colour_brewer(palette = "Dark2", name = "Dataset")            +
+    xlab("Total counts")                                                +
+    ylab("Number of expressed genes")                                   +
+    ggtitle("Comparison of number of expressed genes and total counts")
+```
+
+Session info
+============
+
+```{r session-info, cache = FALSE}
+devtools::session_info()
+```
+
+```{r cleanup-docs, cache = FALSE}
+doc.files <- c(list.files(pattern = "pdf"),
+               list.files(pattern = "html"),
+               list.files(pattern = "docx"))
+
+for (file in doc.files) {
+    file.rename(file, file.path("docs", file))
+}
+```
