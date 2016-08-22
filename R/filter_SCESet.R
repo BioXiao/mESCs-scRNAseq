@@ -16,6 +16,9 @@
 filterKolodCounts <- function(kolod, genes = TRUE, cells = TRUE,
                               plates = TRUE) {
 
+    gene.names <- Biobase::featureNames(kolod)
+    genes.ercc <- grep(pattern = "ERCC-", gene.names, value = TRUE)
+
     # Keep cells with low dropout and decent library size
     if (cells) {
         # Select only endogenous genes
@@ -44,7 +47,7 @@ filterKolodCounts <- function(kolod, genes = TRUE, cells = TRUE,
     }
 
     # Make sure metrics are correct
-    kolod <- scater::calculateQCMetrics(kolod)
+    kolod <- scater::calculateQCMetrics(kolod, feature_controls = genes.ercc)
 
     return(kolod)
 }

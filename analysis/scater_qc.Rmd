@@ -1,0 +1,142 @@
+---
+title: "Scater QC"
+author: "Luke Zappia"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+Code version: `r system("git log -1 --format=oneline | cut -d' ' -f1", intern = TRUE)`
+
+```{r knitr, include = FALSE}
+DOCNAME = "scater_qc"
+knitr::opts_chunk$set(autodep        = TRUE,
+                      cache          = TRUE,
+                      cache.path     = paste0("cache/", DOCNAME, "/"),
+                      cache.comments = TRUE,
+                      echo           = FALSE,
+                      error          = FALSE,
+                      fig.align      = "center",
+                      fig.path       = paste0("figures/", DOCNAME, "/"),
+                      fig.width      = 10,
+                      fig.height     = 8,
+                      message        = FALSE,
+                      warning        = FALSE)
+```
+
+```{r libraries}
+# RNA-seq
+library("scater")
+```
+
+```{r source, cache = FALSE}
+source("../R/load_SCESet.R")
+```
+
+Introduction
+============
+
+In this document we are going to investigate some of the properties of mESC
+scRNA-seq data from Kolodziejczyk AA et al. 2015. ["Single cell RNA-sequencing
+of pluripotent states unlocks modular transcriptional variation."](
+http://www.sciencedirect.com/science/article/pii/S193459091500418X).
+
+```{r load}
+kolod <- loadKolodCounts()
+colour.by <- "Condition"
+```
+
+Scater plots
+============
+
+By cell
+-------
+
+### Library contribution (top features)
+
+```{r feature-lib-contrib}
+plot(kolod, colour_by = colour.by)
+```
+
+### Library size
+
+```{r total-counts}
+plotPhenoData(kolod, aes_string(x = colour.by, y = "total_counts",
+                         colour = "total_features"))
+```
+
+### Number of features by library size
+
+```{r count-features}
+plotPhenoData(kolod, aes_string(x = "total_counts", y = "total_features",
+                         colour = colour.by))
+```
+
+### PCA
+
+```{r pca}
+plotPCA(kolod, colour_by = colour.by)
+```
+
+```{r pca-four}
+plotPCA(kolod, ncomponents = 4, colour_by = colour.by)
+```
+
+### PCA (ERCC spike-ins)
+
+```{r pca-ERCC}
+plotPCA(kolod, colour_by = colour.by,
+        feature_set = fData(kolod)$is_feature_control)
+```
+
+### tSNE
+
+```{r tSNE}
+plotTSNE(kolod, colour_by = colour.by)
+```
+
+By gene
+-------
+
+### High expression
+
+```{r high-expression}
+plotQC(kolod, type = "highest-expression")
+```
+
+### Expression frequency by mean
+
+```{r mean-expression-freq}
+plotQC(kolod, type = "exprs-freq-vs-mean")
+```
+
+### Percent expression by num cells expressed
+
+```{r gene-expression}
+plotFeatureData(kolod, aes(x = n_cells_exprs, y = pct_total_counts,
+                           colour = is_feature_control))
+```
+
+```{r explanatory, eval = FALSE}
+plotQC(kolod, type = "expl")
+```
+
+```{r explanatory-pairs, eval = FALSE}
+plotQC(kolod, type = "expl", method = "pairs", theme_size = 6)
+```
+
+Session info
+============
+
+```{r sessionInfo, cache = FALSE}
+devtools::session_info()
+```
+
+```{r cleanup-docs, cache = FALSE}
+doc.files <- c(list.files(pattern = "pdf"),
+               list.files(pattern = "html"),
+               list.files(pattern = "docx"))
+
+for (file in doc.files) {
+    file.rename(file, file.path("docs", file))
+}
+```
