@@ -8,13 +8,22 @@
 #' @param cells Logical. Whether to filter bad cells based on dropout and
 #'        library size.
 #' @param plates Logical. Whether to filter known bad plates.
+#' @param ercc Logical. Whether to remove ERCC genes.
+#' @param condition String. Condition to keep. Options are: "all",
+#'        "alternative 2i media + LIF", "serum + LIF" or
+#'        "standard 2i media + LIF".
 #'
 #' @return Filtered SCSSet object.
 #' @examples
 #' kolod <- loadKolodCounts()
 #' kolod.filter <- filterKolodCounts(kolod)
 filterKolodCounts <- function(kolod, genes = TRUE, cells = TRUE,
-                              plates = TRUE) {
+                              plates = TRUE, ercc = FALSE,
+                              condition = c("all", "alternative 2i media + LIF",
+                                            "serum + LIF",
+                                            "standard 2i media + LIF")) {
+
+    condition <- match.arg(condition)
 
     gene.names <- Biobase::featureNames(kolod)
     genes.ercc <- grep(pattern = "ERCC-", gene.names, value = TRUE)
@@ -44,6 +53,16 @@ filterKolodCounts <- function(kolod, genes = TRUE, cells = TRUE,
         kolod <- scater::calculateQCMetrics(kolod)
         lo.drop <- Biobase::fData(kolod)$pct_dropout <= 90
         kolod <- kolod[lo.drop, ]
+    }
+
+    # Select condition
+    if (condition != "all") {
+        kolod <- kolod[, Biobase::pData(kolod)$Condition == condition]
+    }
+
+    # Remove spike-ins
+    if (ercc) {
+        kolod <- kolod[!(Biobase::fData(kolod)$Gene %in% genes.ercc), ]
     }
 
     # Make sure metrics are correct
